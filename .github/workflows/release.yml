@@ -1,6 +1,10 @@
 # 发布容器镜像到 ghcr.io。没有这个，README 承诺的"一条命令"实际是
 # "在自己机器上编译 Rust release + LTO 二十分钟，还得先拉得到 rust/node 基础镜像"。
 #
+# **只由手工触发**：Actions 页面 Run workflow，或
+# `gh workflow run release.yml -f tag=0.1.0`。不再监听 tag 推送——打 tag 和发镜像
+# 解耦，什么时候发、发哪个版本由人决定，误推一个 tag 不会再顺带把镜像推上去。
+#
 # 镜像是多平台的：linux/amd64 + linux/arm64。rc7 及之前只有 amd64，Apple Silicon
 # 和 Graviton 上 `docker pull` 直接报 "no matching manifest for linux/arm64/v8"，
 # 强制 --platform 之后又是在 QEMU 里跑。
@@ -12,15 +16,22 @@
 # 做法照 docker/build-push-action 的 "Distribute build across multiple runners"。
 name: Release
 
+# 唯一的入口是 workflow_dispatch：原来的 `push: tags: ["v*"]` 已去掉，
+# 正式版与 rc 现在都从这里手动发。
 on:
-  push:
-    tags: ["v*"]
-  # 正式打 tag 之前先出一个可部署的镜像用
   workflow_dispatch:
     inputs:
       tag:
         description: "Image tag to publish (e.g. 0.1.0-rc5)"
         required: true
+        type: string
+      # latest 要显式勾选：手工输入的标签五花八门（rc、hotfix、试用的名字），
+      # 继续用「标签里有没有连字符」当判据，一个叫 test 的分支发布就会把 latest 拖走。
+      latest:
+        description: "Also move the 'latest' tag to this image"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -178,15 +189,16 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.image.outputs.name }}
+          # 手工触发时版本号只来自输入框，不再从 ref 猜。semver 那两条只对 tag ref
+          # 生效——从 Actions 页面选一个 tag 来跑（`--ref v0.1.0`）才会额外命中，
+          # 从分支跑就只打输入的那个标签。
           tags: |
+            type=raw,value=${{ inputs.tag }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            # **预发布不动 latest。** `{{major}}.{{minor}}` 那两条
-            # metadata-action 自己会跳过预发布，而这条 raw 不会——推一个
-            # `v0.1.0-rc1` 就把 latest 拖了过去，而那正好是 rc 要避免的事。
-            # 判据是 tag 里有没有连字符：semver 用它标预发布
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
-            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            # latest 只在显式勾选时才动。默认 false 意味着手工发的镜像永远不碰
+            # latest（rc 和 hotfix 要的正是这个），要发正式版就勾上。
+            type=raw,value=latest,enable=${{ inputs.latest }}
 
       - name: Create manifest list and push
         working-directory: ${{ runner.temp }}/digests
